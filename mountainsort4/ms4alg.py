@@ -265,7 +265,6 @@ def compute_event_features_from_timeseries_model(X: Any, times: np.ndarray, *, n
     M_neigh = len(nbhd_channels)
 
     padding = clip_size*10
-
     # Subsample and extract clips for pca
     times_for_pca = subsample_array(times, max_num_clips_for_pca)
     # clips_for_pca=extract_clips_from_timeseries_model(X,times_for_pca,clip_size=clip_size,nbhd_channels=nbhd_channels)
@@ -426,6 +425,13 @@ class _NeighborhoodSorter:
         detect_sign = o['detect_sign']
         detect_threshold = o['detect_threshold']
         num_features = o['num_features']
+        if self._sorting_opts['verbose']:
+            print('num feat input', num_features)
+        # So according to comments, the number of actual features needs to be 2X because of the branch method.
+        # Make sure that 2X the number of features does not exceed the clip size
+        num_features = min(num_features, clip_size // 2)
+        if self._sorting_opts['verbose']:
+            print('num feat corrected', num_features)
         # num_features=10
         geom = self._geom
         if geom is None:
@@ -489,7 +495,7 @@ class _NeighborhoodSorter:
                         self._central_channel, mode))
         # times=np.sort(times)
         features = compute_event_features_from_timeseries_model(
-            X, times, nbhd_channels=nbhd_channels, clip_size=clip_size, max_num_clips_for_pca=max_num_clips_for_pca, num_features=num_features*2, chunk_infos=chunk_infos)
+            X, times, nbhd_channels=nbhd_channels, clip_size=clip_size, max_num_clips_for_pca=max_num_clips_for_pca, num_features=num_features, chunk_infos=chunk_infos)
 
         # The clustering
         if self._sorting_opts['verbose']:
