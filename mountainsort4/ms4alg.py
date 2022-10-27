@@ -848,10 +848,11 @@ class MountainSort4:
                 os.remove(fname0)
             NS.setHdf5FilePath(fname0)
             neighborhood_sorters.append(NS)
-            tmp_dask = dask.delayed(run_phase1_sort)(NS)
+            # tmp_dask = dask.delayed(run_phase1_sort)(NS)
+            tmp_dask = run_phase1_sort(NS)
             dask_list.append(tmp_dask)
 
-        dask.compute(*dask_list, num_workers=self._num_workers)
+        # dask.compute(*dask_list, num_workers=self._num_workers)
 
         # for m in range(M):
         #    print ('Running phase1 neighborhood sort for channel {} of {}...'.format(m+1,M)); sys.stdout.flush()
