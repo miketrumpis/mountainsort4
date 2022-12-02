@@ -9,7 +9,6 @@ setup(
         'isosplit5==0.1.3',
         'numpy',
         'h5py',
-        'sklearn',
         'spikeextractors>=0.9.5'
     ]
 )
