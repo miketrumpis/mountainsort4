@@ -8,6 +8,7 @@ import os
 import multiprocessing
 import dask
 import dask.multiprocessing
+from scipy.interpolate import interp1d
 from ._mdaio_impl import writemda32, writemda64, DiskReadMda, readmda
 import spikeextractors as se
 
@@ -132,16 +133,37 @@ def compute_sliding_maximum(X: np.ndarray, radius: int) -> Any:
     return ret
 
 
-def extract_clips(data: np.ndarray, *, times: np.ndarray, clip_size: int):
+def upsample_spike(v, n):
+    t = np.arange(v.shape[-1])
+    fn = interp1d(t, v, kind='cubic', axis=-1)
+    n_in = v.shape[-1]
+    t_out = np.linspace(t[0], t[-1], (n_in - 1) * n + 1)
+    return t_out, fn(t_out)
+
+
+def extract_clips(data: np.ndarray, *, times: np.ndarray, clip_size: int, interpolate_factor: int):
     M = data.shape[0]
-    T = clip_size
+    T = (clip_size - 1) * interpolate_factor + 1
     L = len(times)
-    Tmid = math.floor((T + 1) / 2) - 1
+    # take an extended clip with 4 extra points on each side..
+    # this is to allow that the peak alignment time might be a
+    # fraction of a whole sample, after interpolation
+    buf_samps = 2
+    clip_buf_size = clip_size + 2 * buf_samps
+    Tmid = math.floor((clip_buf_size + 1) / 2) - 1
     clips = np.zeros((M, T, L), dtype='float32')
     for j in range(L):
-        t1 = times[j]-Tmid
-        t2 = t1+clip_size
-        clips[:, :, j] = data[:, t1:t2]
+        t1 = times[j] - Tmid
+        t2 = t1 + clip_buf_size
+        clip_raw = data[:, t1:t2]
+        t_resamp, clip_resamp = upsample_spike(clip_raw, interpolate_factor)
+        # The shift should be fractional, so only look between Tmid - 1, Tmid + 1
+        sub_sl = clip_resamp[..., (Tmid - 1) * interpolate_factor:(Tmid + 1) * interpolate_factor + 1].mean(axis=0)
+        shift = np.argmin(sub_sl)
+        clip_resamp = np.roll(clip_resamp, interpolate_factor - shift, axis=1)
+        # now clip the samples to the correct size
+        clip_slice = np.s_[:, buf_samps * interpolate_factor:-buf_samps * interpolate_factor]
+        clips[:, :, j] = clip_resamp[clip_slice]
     return clips
 
 
@@ -256,7 +278,9 @@ def extract_clips_from_timeseries_model(X,times,*,clip_size,nbhd_channels):
 '''
 
 
-def compute_event_features_from_timeseries_model(X: Any, times: np.ndarray, *, nbhd_channels, clip_size: int, max_num_clips_for_pca: int, num_features: int, chunk_infos: List[dict]):
+def compute_event_features_from_timeseries_model(X: Any, times: np.ndarray, *, nbhd_channels, clip_size: int,
+                                                 max_num_clips_for_pca: int, num_features: int,
+                                                 chunk_infos: List[dict], interpolate_factor: int):
     if times.size == 0:
         return np.array([])
 
@@ -264,40 +288,53 @@ def compute_event_features_from_timeseries_model(X: Any, times: np.ndarray, *, n
     # X_neigh=X.getChunk(t1=0,t2=N,channels=nbhd_channels)
     M_neigh = len(nbhd_channels)
 
+    # MJT add interpolation in this section
     padding = clip_size*10
     # Subsample and extract clips for pca
     times_for_pca = subsample_array(times, max_num_clips_for_pca)
     # clips_for_pca=extract_clips_from_timeseries_model(X,times_for_pca,clip_size=clip_size,nbhd_channels=nbhd_channels)
-    clips_for_pca = np.zeros((M_neigh, clip_size, len(times_for_pca)))
+    pca_clip_size = (clip_size - 1) * interpolate_factor + 1
+    clips_for_pca = np.zeros((M_neigh, pca_clip_size, len(times_for_pca)))
     for ii in range(len(chunk_infos)):
         chunk0 = chunk_infos[ii]
         inds0 = np.where((chunk0['t1'] <= times_for_pca)
                          & (times_for_pca < chunk0['t2']))[0]
         if len(inds0) > 0:
+            # MJT probably interpolating here
+            # X0 should be shaped (n_channel, t2 - t1 + 2 * padding)
+            # X0 looks like the window chunk_info[ii] with a bit of padding
             X0 = X.getChunk(
                 t1=chunk0['t1']-padding, t2=chunk0['t2']+padding, channels=nbhd_channels)
+            # now find the PCA times within this chunk, and extract clips
             times0 = times_for_pca[inds0]
+            # MJT THIS is where the interpolation is going to happen --
+            # return size is going to be (n_channel, up_rate * (clip_size - 1) + 1, n_times)
             clips0 = extract_clips(
-                X0, times=times0-(chunk0['t1']-padding), clip_size=clip_size)
+                X0, times=times0-(chunk0['t1']-padding), clip_size=clip_size,
+                interpolate_factor=interpolate_factor)
             clips_for_pca[:, :, inds0] = clips0
 
     # Compute the principal components
     # use twice as many features, because of branch method
     principal_components = compute_principal_components(clips_for_pca.reshape(
-        (M_neigh*clip_size, len(times_for_pca))), num_features*2)  # (MT x 2F)
+        (M_neigh * pca_clip_size, len(times_for_pca))), num_features * 2)  # (MT x 2F)
 
     # Compute the features for all the clips
-    features = np.zeros((num_features*2, len(times)))
+    features = np.zeros((num_features * 2, len(times)))
     for ii in range(len(chunk_infos)):
         chunk0 = chunk_infos[ii]
+        # MJT and interpolating again here
         X0 = X.getChunk(t1=chunk0['t1']-padding,
                         t2=chunk0['t2']+padding, channels=nbhd_channels)
         inds0 = np.where((chunk0['t1'] <= times) & (times < chunk0['t2']))[0]
         times0 = times[inds0]
+        # MJT: again perform interpolation here
         clips0 = extract_clips(
-            X0, times=times0-(chunk0['t1']-padding), clip_size=clip_size)
-        features0 = principal_components.transpose() @ clips0.reshape((M_neigh*clip_size,
-                                                                       len(times0)))  # (2F x MT) @ (MT x L0) -> (2F x L0)
+            X0, times=times0-(chunk0['t1']-padding), clip_size=clip_size,
+            interpolate_factor=interpolate_factor)
+        # (2F x MT) @ (MT x L0) -> (2F x L0)
+        features0 = principal_components.transpose() @ clips0.reshape((M_neigh * pca_clip_size,
+                                                                       len(times0)))
         features[:, inds0] = features0
 
     return features
@@ -310,7 +347,8 @@ def compute_event_features_from_timeseries_model(X: Any, times: np.ndarray, *, n
     # return features
 
 
-def compute_templates_from_timeseries_model(X: Any, times: np.ndarray, labels: np.ndarray, *, nbhd_channels, clip_size: int, chunk_infos: List[dict]):
+def compute_templates_from_timeseries_model(X: Any, times: np.ndarray, labels: np.ndarray, *, nbhd_channels,
+                                            clip_size: int, chunk_infos: List[dict]):
     # TODO: subsample smartly here
     padding = clip_size*10
     M0 = len(nbhd_channels)
@@ -324,8 +362,9 @@ def compute_templates_from_timeseries_model(X: Any, times: np.ndarray, labels: n
         inds0 = np.where((chunk0['t1'] <= times) & (times < chunk0['t2']))[0]
         times0 = times[inds0]
         labels0 = labels[inds0]
+        # MJT also need to interpolate for templates???
         clips0 = extract_clips(
-            X0, times=times0-(chunk0['t1']-padding), clip_size=clip_size)
+            X0, times=times0-(chunk0['t1']-padding), clip_size=clip_size, interpolate_factor=1)
 
         for k in range(K):
             inds_k = np.where(labels0 == (k+1))[0]
@@ -425,6 +464,7 @@ class _NeighborhoodSorter:
         detect_sign = o['detect_sign']
         detect_threshold = o['detect_threshold']
         num_features = o['num_features']
+        interpolate_factor = o['interpolate_factor']
         if self._sorting_opts['verbose']:
             print('num feat input', num_features)
         # So according to comments, the number of actual features needs to be 2X because of the branch method.
@@ -458,7 +498,9 @@ class _NeighborhoodSorter:
                 sys.stdout.flush()
             timer = datetime.datetime.now()
             times, assign_to_this_neighborhood = detect_on_neighborhood_from_timeseries_model(
-                X, channel=m_central, nbhd_channels=nbhd_channels, detect_threshold=detect_threshold, detect_sign=detect_sign, detect_interval=detect_interval, margin=clip_size, chunk_infos=chunk_infos)
+                X, channel=m_central, nbhd_channels=nbhd_channels, detect_threshold=detect_threshold,
+                detect_sign=detect_sign, detect_interval=detect_interval, margin=clip_size,
+                chunk_infos=chunk_infos)
             if self._sorting_opts['verbose']:
                 print('Elapsed time for detect on neighborhood:',
                       datetime.datetime.now()-timer)
@@ -495,7 +537,8 @@ class _NeighborhoodSorter:
                         self._central_channel, mode))
         # times=np.sort(times)
         features = compute_event_features_from_timeseries_model(
-            X, times, nbhd_channels=nbhd_channels, clip_size=clip_size, max_num_clips_for_pca=max_num_clips_for_pca, num_features=num_features, chunk_infos=chunk_infos)
+            X, times, nbhd_channels=nbhd_channels, clip_size=clip_size, max_num_clips_for_pca=max_num_clips_for_pca,
+            num_features=num_features, chunk_infos=chunk_infos, interpolate_factor=interpolate_factor)
 
         # The clustering
         if self._sorting_opts['verbose']:
@@ -737,6 +780,7 @@ class MountainSort4:
             "detect_threshold": 3,
             "num_features": 10,
             "max_num_clips_for_pca": 1000,
+            "interpolate_factor": 1,
         }
         self._timeseries_path = None
         self._firings_out_path = None
@@ -747,7 +791,8 @@ class MountainSort4:
         self._use_recording_directly = False
 
     def setSortingOpts(self, clip_size=None, adjacency_radius=None, detect_sign=None, detect_interval=None,
-                       detect_threshold=None, num_features=None, max_num_clips_for_pca=None, verbose=True):
+                       detect_threshold=None, num_features=None, max_num_clips_for_pca=None,
+                       interpolate_factor=None, verbose=True):
         if clip_size is not None:
             self._sorting_opts['clip_size'] = clip_size
         if adjacency_radius is not None:
@@ -764,6 +809,8 @@ class MountainSort4:
             self._sorting_opts['max_num_clips_for_pca'] = max_num_clips_for_pca
         if verbose is not None:
             self._sorting_opts['verbose'] = verbose
+        if interpolate_factor is not None:
+            self._sorting_opts['interpolate_factor'] = interpolate_factor
 
     def setRecording(self, recording):
         self._recording = recording

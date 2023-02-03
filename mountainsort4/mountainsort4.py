@@ -9,8 +9,11 @@ import multiprocessing
 import spikeextractors as se
 
 
-def mountainsort4(*, recording: se.RecordingExtractor, detect_sign: int, clip_size: int=50, adjacency_radius: float=-1, detect_threshold: float=3, detect_interval: int=10,
-                  num_workers: Union[None, int]=None, verbose: bool=True, use_recording_directly: bool=False) -> se.SortingExtractor:
+def mountainsort4(*, recording: se.RecordingExtractor, detect_sign: int, clip_size: int=50,
+                  interpolate_factor: int=1, num_features: int=10,
+                  adjacency_radius: float=-1, detect_threshold: float=3, detect_interval: int=10,
+                  num_workers: Union[None, int]=None, verbose: bool=True,
+                  use_recording_directly: bool=False) -> se.SortingExtractor:
     if num_workers is None:
         num_workers = math.floor((multiprocessing.cpu_count()+1)/2)
 
@@ -27,6 +30,8 @@ def mountainsort4(*, recording: se.RecordingExtractor, detect_sign: int, clip_si
         detect_sign=detect_sign,
         detect_interval=detect_interval,
         detect_threshold=detect_threshold,
+        num_features=num_features,
+        interpolate_factor=interpolate_factor,
         verbose=verbose
     )
     tmpdir = tempfile.mkdtemp(dir=os.environ.get('TEMPDIR', '/tmp'))
