@@ -10,12 +10,9 @@ import dask
 import dask.multiprocessing
 from scipy.interpolate import interp1d
 from ._mdaio_impl import writemda32, writemda64, DiskReadMda, readmda
-import spikeextractors as se
-
 
 import datetime
 
-# import h5py
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.resetwarnings()
@@ -135,6 +132,8 @@ def compute_sliding_maximum(X: np.ndarray, radius: int) -> Any:
 
 def upsample_spike(v, n):
     t = np.arange(v.shape[-1])
+    if n == 1:
+        return t, v
     fn = interp1d(t, v, kind='cubic', axis=-1)
     n_in = v.shape[-1]
     t_out = np.linspace(t[0], t[-1], (n_in - 1) * n + 1)
@@ -834,7 +833,7 @@ class MountainSort4:
         self._temporary_directory = tempdir
 
     def eventTimesLabelsChannels(self):
-        return (self._event_times, self._event_labels, self._event_labels)
+        return (self._event_times, self._event_labels, self._event_channels)
 
     def sort(self):
 

@@ -8,7 +8,6 @@ setup(
         'pybind11',
         'isosplit5==0.1.3',
         'numpy',
-        'h5py',
-        'spikeextractors>=0.9.5'
+        'h5py'
     ]
 )
